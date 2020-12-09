@@ -3,6 +3,7 @@ package org.csanchez.jenkins.plugins.kubernetes.volumes.workspace;
 import com.google.common.collect.ImmutableMap;
 import hudson.Extension;
 import hudson.Util;
+import hudson.model.AbstractDescribableImpl;
 import hudson.model.Descriptor;
 import hudson.util.ListBoxModel;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
@@ -22,6 +23,7 @@ import org.kohsuke.stapler.DataBoundSetter;
 import org.kohsuke.stapler.interceptor.RequirePOST;
 
 import javax.annotation.CheckForNull;
+import java.io.Serializable;
 import java.util.Map;
 import java.util.Objects;
 import java.util.logging.Level;
@@ -40,14 +42,16 @@ public class DynamicPVCWorkspaceVolume extends WorkspaceVolume {
     private String accessModes;
     private static final Logger LOGGER = Logger.getLogger(DynamicPVCWorkspaceVolume.class.getName());
 
-    @DataBoundConstructor
     public DynamicPVCWorkspaceVolume() {}
 
+    @DataBoundConstructor
     public DynamicPVCWorkspaceVolume(String storageClassName,
                                      String requestsSize, String accessModes) {
         this.storageClassName = storageClassName;
         this.requestsSize = requestsSize;
         this.accessModes = accessModes;
+
+        LOGGER.log(INFO,"DynamicPVCWorkspaceVolume has been Constructed!");
     }
 
     @CheckForNull
@@ -90,12 +94,11 @@ public class DynamicPVCWorkspaceVolume extends WorkspaceVolume {
                 .and()
                 .build();
     }
-
     @Override
     public PersistentVolumeClaim createVolume(KubernetesClient client, ObjectMeta podMetaData){
         String namespace = podMetaData.getNamespace();
         String podId = podMetaData.getName();
-        LOGGER.log(Level.FINE, "Adding workspace volume from pod: {0}/{1}", new Object[] { namespace, podId });
+        LOGGER.log(Level.INFO, "Adding workspace volume from pod: {0}/{1}", new Object[] { namespace, podId });
         OwnerReference ownerReference = new OwnerReferenceBuilder().
                 withApiVersion("v1").
                 withKind("Pod").

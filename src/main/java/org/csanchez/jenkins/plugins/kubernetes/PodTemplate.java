@@ -120,7 +120,8 @@ public class PodTemplate extends AbstractDescribableImpl<PodTemplate> implements
 
     private Boolean hostNetwork;
 
-    private WorkspaceVolume workspaceVolume = WorkspaceVolume.getDefault();
+    //set it free
+    private WorkspaceVolume workspaceVolume;
 
     private final List<PodVolume> volumes = new ArrayList<PodVolume>();
 
@@ -667,13 +668,15 @@ public class PodTemplate extends AbstractDescribableImpl<PodTemplate> implements
 
     @Nonnull
     public WorkspaceVolume getWorkspaceVolume() {
-        return workspaceVolume;
+        return workspaceVolume == null ? WorkspaceVolume.getDefault() : workspaceVolume;
     }
 
     @DataBoundSetter
     public void setWorkspaceVolume(WorkspaceVolume workspaceVolume) {
-        this.workspaceVolume = workspaceVolume;
+        LOGGER.log(Level.INFO, "PodTemplate is setting workspaceVolume ...");
+        this.workspaceVolume = WorkspaceVolume.getDefault().equals(workspaceVolume) ? null : workspaceVolume;
     }
+
 
     @DataBoundSetter
     public void setContainers(@Nonnull List<ContainerTemplate> items) {

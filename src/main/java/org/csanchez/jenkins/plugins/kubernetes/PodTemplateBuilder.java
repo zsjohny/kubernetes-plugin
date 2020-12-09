@@ -143,6 +143,7 @@ public class PodTemplateBuilder {
             }
         }
 
+        LOGGER.log(Level.INFO,"trying to build workspace-volume  ...");
         volumes.put(WORKSPACE_VOLUME_NAME, template.getWorkspaceVolume().buildVolume(WORKSPACE_VOLUME_NAME, slave != null ? slave.getPodName() : null));
 
         Map<String, Container> containers = new HashMap<>();
@@ -263,10 +264,14 @@ public class PodTemplateBuilder {
                .filter(c -> c.getVolumeMounts() == null)
                .forEach(c -> c.setVolumeMounts(new ArrayList<>()));
 
+        //TODO: check the VolumeBuilder.withNewEmptyDir() method  whether it can use rbd volume to mount
+        LOGGER.log(Level.INFO,"try to build a dynamic storage volume with the storageClass  ...");
         // default workspace volume, add an empty volume to share the workspace across the pod
         if (pod.getSpec().getVolumes().stream().noneMatch(v -> WORKSPACE_VOLUME_NAME.equals(v.getName()))) {
             pod.getSpec().getVolumes()
                     .add(new VolumeBuilder().withName(WORKSPACE_VOLUME_NAME).withNewEmptyDir().endEmptyDir().build());
+//                    .add(new VolumeBuilder().withName(WORKSPACE_VOLUME_NAME).withNewRbd().endRbd().build());
+
         }
         // default workspace volume mount. If something is already mounted in the same path ignore it
         pod.getSpec().getContainers().stream()
@@ -275,7 +280,7 @@ public class PodTemplateBuilder {
                                 c.getWorkingDir() != null ? c.getWorkingDir() : ContainerTemplate.DEFAULT_WORKING_DIR)))
                 .forEach(c -> c.getVolumeMounts().add(getDefaultVolumeMount(c.getWorkingDir())));
 
-        LOGGER.finest(() -> "Pod built: " + Serialization.asYaml(pod));
+        LOGGER.log(Level.INFO, "Pod built: " + Serialization.asYaml(pod));
         return pod;
     }
 
@@ -440,6 +445,7 @@ public class PodTemplateBuilder {
             wd = ContainerTemplate.DEFAULT_WORKING_DIR;
             LOGGER.log(Level.FINE, "Container workingDir is null, defaulting to {0}", wd);
         }
+        // default container mount emptydir type volume
         return new VolumeMountBuilder().withMountPath(wd).withName(WORKSPACE_VOLUME_NAME).withReadOnly(false).build();
     }
 

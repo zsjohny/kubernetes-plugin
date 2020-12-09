@@ -131,7 +131,9 @@ public class KubernetesLauncher extends JNLPLauncher {
             TaskListener runListener = template.getListener();
             runListener.getLogger().printf("Created Pod: %s/%s%n", namespace, podName);
 
+            LOGGER.log(INFO, "Creating dynamic-PVC ...");
             template.getWorkspaceVolume().createVolume(client, pod.getMetadata());
+
             watcher = new AllContainersRunningPodWatcher(client, pod, runListener);
             try (Watch w1 = client.pods().inNamespace(namespace).withName(podName).watch(watcher);
                  Watch w2 = eventWatch(client, podName, namespace, runListener)) {

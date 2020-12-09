@@ -5,6 +5,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import com.google.common.collect.ImmutableSet;
 
@@ -35,6 +37,8 @@ public class PodTemplateStep extends Step implements Serializable {
     private static final long serialVersionUID = 5588861066775717487L;
 
     private static final String DEFAULT_CLOUD = "kubernetes";
+
+    private static final Logger LOGGER = Logger.getLogger(PodTemplateStep.class.getName());
 
     @CheckForNull
     private String cloud = DEFAULT_CLOUD;
@@ -200,6 +204,7 @@ public class PodTemplateStep extends Step implements Serializable {
 
     @DataBoundSetter
     public void setWorkspaceVolume(@CheckForNull WorkspaceVolume workspaceVolume) {
+        LOGGER.log(Level.INFO, "pipeline PodTemplateStep is setting workspaceVolume ...");
         this.workspaceVolume = (workspaceVolume == null || workspaceVolume.equals(DescriptorImpl.defaultWorkspaceVolume)) ? null : workspaceVolume;
     }
 
