@@ -24,9 +24,21 @@
 
 package org.csanchez.jenkins.plugins.kubernetes.pipeline;
 
-import static org.csanchez.jenkins.plugins.kubernetes.KubernetesTestUtil.*;
-import static org.hamcrest.Matchers.*;
-import static org.junit.Assert.*;
+import static org.csanchez.jenkins.plugins.kubernetes.KubernetesTestUtil.CONTAINER_ENV_VAR_FROM_SECRET_VALUE;
+import static org.csanchez.jenkins.plugins.kubernetes.KubernetesTestUtil.POD_ENV_VAR_FROM_SECRET_VALUE;
+import static org.csanchez.jenkins.plugins.kubernetes.KubernetesTestUtil.assumeWindows;
+import static org.csanchez.jenkins.plugins.kubernetes.KubernetesTestUtil.deletePods;
+import static org.csanchez.jenkins.plugins.kubernetes.KubernetesTestUtil.getLabels;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.emptyIterable;
+import static org.hamcrest.Matchers.hasEntry;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.oneOf;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.*;
 
 import java.io.File;
@@ -37,7 +49,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.stream.Collectors;
 
 import hudson.model.Computer;
 import com.gargoylesoftware.htmlunit.html.DomNodeUtil;
@@ -47,21 +58,24 @@ import hudson.model.Label;
 import hudson.model.Run;
 import hudson.slaves.SlaveComputer;
 import hudson.util.VersionNumber;
+import io.fabric8.kubernetes.api.model.ObjectMeta;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.PodList;
 import io.fabric8.kubernetes.client.KubernetesClientException;
+import jenkins.metrics.api.Metrics;
 import jenkins.model.Jenkins;
 import org.csanchez.jenkins.plugins.kubernetes.ContainerTemplate;
 import org.csanchez.jenkins.plugins.kubernetes.KubernetesSlave;
+import org.csanchez.jenkins.plugins.kubernetes.MetricNames;
 import org.csanchez.jenkins.plugins.kubernetes.PodAnnotation;
 import org.csanchez.jenkins.plugins.kubernetes.PodTemplate;
+import org.csanchez.jenkins.plugins.kubernetes.PodTemplateUtils;
 import org.hamcrest.MatcherAssert;
 import org.hamcrest.Matchers;
 import org.jenkinsci.plugins.workflow.job.WorkflowRun;
 import org.jenkinsci.plugins.workflow.support.steps.ExecutorStepExecution;
 import org.jenkinsci.plugins.workflow.test.steps.SemaphoreStep;
 import org.junit.After;
-import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -73,9 +87,12 @@ import org.jvnet.hudson.test.LoggerRule;
 
 import hudson.model.Result;
 import java.util.Locale;
+import java.util.stream.Collectors;
+
 import org.jenkinsci.plugins.workflow.flow.FlowDurabilityHint;
 import org.jenkinsci.plugins.workflow.flow.GlobalDefaultFlowDurabilityLevel;
 import org.junit.Ignore;
+import org.jvnet.hudson.test.FlagRule;
 import org.jvnet.hudson.test.MockAuthorizationStrategy;
 
 public class KubernetesPipelineTest extends AbstractKubernetesPipelineTest {
@@ -86,14 +103,16 @@ public class KubernetesPipelineTest extends AbstractKubernetesPipelineTest {
     public TemporaryFolder tmp = new TemporaryFolder();
 
     @Rule
-    public LoggerRule warnings = new LoggerRule();
+    public LoggerRule warnings = new LoggerRule().quiet();
+
+    @Rule
+    public FlagRule<Boolean> substituteEnv = new FlagRule<>(() -> PodTemplateUtils.SUBSTITUTE_ENV, x -> PodTemplateUtils.SUBSTITUTE_ENV = x);
 
     @Before
     public void setUp() throws Exception {
         // Had some problems with FileChannel.close hangs from WorkflowRun.save:
         r.jenkins.getDescriptorByType(GlobalDefaultFlowDurabilityLevel.DescriptorImpl.class).setDurabilityHint(FlowDurabilityHint.PERFORMANCE_OPTIMIZED);
         deletePods(cloud.connect(), getLabels(cloud, this, name), false);
-        warnings.record("", Level.WARNING).capture(1000);
         assertNotNull(createJobThenScheduleRun());
     }
 
@@ -114,6 +133,7 @@ public class KubernetesPipelineTest extends AbstractKubernetesPipelineTest {
     @Issue("JENKINS-57993")
     @Test
     public void runInPod() throws Exception {
+        warnings.record("", Level.WARNING).capture(1000);
         SemaphoreStep.waitForStart("podTemplate/1", b);
         List<PodTemplate> templates = podTemplatesWithLabel(name.getMethodName(), cloud.getAllTemplates());
         assertThat(templates, hasSize(1));
@@ -180,6 +200,10 @@ public class KubernetesPipelineTest extends AbstractKubernetesPipelineTest {
         assertThat(pod.getMetadata().getLabels(), hasEntry("jenkins", "slave"));
         assertThat("Pod labels are wrong: " + pod, pod.getMetadata().getLabels(), hasEntry("jenkins/label", name.getMethodName()));
 
+        SemaphoreStep.waitForStart("after-podtemplate/1", b);
+        assertThat(podTemplatesWithLabel(name.getMethodName(), cloud.getAllTemplates()), hasSize(0));
+        SemaphoreStep.success("after-podtemplate/1", null);
+
         r.assertBuildStatusSuccess(r.waitForCompletion(b));
         r.assertLogContains("script file contents: ", b);
         assertFalse("There are pods leftover after test execution, see previous logs",
@@ -189,6 +213,9 @@ public class KubernetesPipelineTest extends AbstractKubernetesPipelineTest {
                 filter(lr -> lr.getLevel().intValue() >= Level.WARNING.intValue()). // TODO .record(…, WARNING) does not accomplish this
                 map(lr -> lr.getSourceClassName() + "." + lr.getSourceMethodName() + ": " + lr.getMessage()).collect(Collectors.toList()), // LogRecord does not override toString
             emptyIterable());
+
+        assertTrue(Metrics.metricRegistry().counter(MetricNames.PODS_LAUNCHED).getCount() > 0);
+        assertTrue(Metrics.metricRegistry().meter(MetricNames.metricNameForLabel(Label.parseExpression("runInPod"))).getCount() > 0);
     }
 
     @Test
@@ -248,6 +275,13 @@ public class KubernetesPipelineTest extends AbstractKubernetesPipelineTest {
         r.assertLogContains("INSIDE_CONTAINER_ENV_VAR_FROM_SECRET = ******** or " + CONTAINER_ENV_VAR_FROM_SECRET_VALUE.toUpperCase(Locale.ROOT) + "\n", b);
         assertFalse("There are pods leftover after test execution, see previous logs",
                 deletePods(cloud.connect(), getLabels(cloud, this, name), true));
+    }
+
+    @Test
+    public void runInPodWithDifferentShell() throws Exception {
+        r.assertBuildStatus(Result.FAILURE, r.waitForCompletion(b));
+        r.assertLogContains("ERROR: Process exited immediately after creation", b);
+        // r.assertLogContains("/bin/bash: no such file or directory", b); // Not printed in CI for an unknown reason.
     }
 
     @Test
@@ -411,7 +445,7 @@ public class KubernetesPipelineTest extends AbstractKubernetesPipelineTest {
         PodList pods = cloud.connect().pods().withLabels(labels).list();
         assertThat(
                 "Expected one pod with labels " + labels + " but got: "
-                        + pods.getItems().stream().map(pod -> pod.getMetadata()).collect(Collectors.toList()),
+                        + pods.getItems().stream().map(Pod::getMetadata).map(ObjectMeta::getName).collect(Collectors.toList()),
                 pods.getItems(), hasSize(1));
         SemaphoreStep.success("pod/1", null);
         r.assertBuildStatusSuccess(r.waitForCompletion(b));
@@ -638,6 +672,19 @@ public class KubernetesPipelineTest extends AbstractKubernetesPipelineTest {
         r.assertBuildStatus(Result.FAILURE, r.waitForCompletion(b));
         r.assertLogContains("ERROR: Unable to create pod", b);
         r.assertLogContains("ERROR: Queue task was cancelled", b);
+    }
+
+    @Issue("SECURITY-1646")
+    @Test
+    public void substituteEnv() throws Exception {
+        r.assertBuildStatusSuccess(r.waitForCompletion(b));
+        String home = System.getenv("HOME");
+        assumeNotNull(home);
+        r.assertLogContains("hack: \"xxx${HOME}xxx\"", b);
+        r.assertLogNotContains("xxx" + home + "xxx", b);
+        PodTemplateUtils.SUBSTITUTE_ENV = true;
+        b = r.buildAndAssertSuccess(p);
+        r.assertLogContains("xxx" + home + "xxx", b);
     }
 
     private <R extends Run> R assertBuildStatus(R run, Result... status) throws Exception {

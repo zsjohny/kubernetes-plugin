@@ -29,6 +29,7 @@ import hudson.Main;
 import hudson.model.ItemGroup;
 import hudson.model.Node;
 import hudson.util.XStream2;
+import jenkins.metrics.api.Metrics;
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.lang.StringUtils;
 import org.csanchez.jenkins.plugins.kubernetes.pipeline.PodTemplateMap;
@@ -72,6 +73,8 @@ import jenkins.model.Jenkins;
 import jenkins.model.JenkinsLocationConfiguration;
 import jenkins.authentication.tokens.api.AuthenticationTokens;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.csanchez.jenkins.plugins.kubernetes.MetricNames.metricNameForLabel;
+
 import jenkins.websocket.WebSockets;
 
 /**
@@ -292,14 +295,7 @@ public class KubernetesCloud extends Cloud {
     }
 
     /**
-     * Returns Jenkins URL to be used by agents launched by this cloud. Always ends with a trailing slash.
-     *
-     * Uses in order:
-     * * cloud configuration
-     * * environment variable <b>KUBERNETES_JENKINS_URL</b>
-     * * Jenkins Location URL
-     *
-     * @return Jenkins URL to be used by agents launched by this cloud. Always ends with a trailing slash.
+     * @return same as {@link #getJenkinsUrlOrNull}, if set
      * @throws IllegalStateException if no Jenkins URL could be computed.
      */
     @Nonnull
@@ -312,26 +308,26 @@ public class KubernetesCloud extends Cloud {
     }
 
     /**
-     * Returns Jenkins URL to be used by agents launched by this cloud. Always ends with a trailing slash.
+     * Jenkins URL to be used by agents launched by this cloud.
      *
-     * Uses in order:
-     * * cloud configuration
-     * * environment variable <b>KUBERNETES_JENKINS_URL</b>
-     * * Jenkins Location URL
+     * <p>Tries in order:<ol>
+     * <li>an explicitly configured URL ({@link #getJenkinsUrl})
+     * <li>the system property or environment variable {@code KUBERNETES_JENKINS_URL}, unless {@link #isWebSocket} mode and {@link #getCredentialsId} is defined
+     * <li>{@link JenkinsLocationConfiguration#getUrl}
+     * </ol>
      *
      * @return Jenkins URL to be used by agents launched by this cloud. Always ends with a trailing slash.
      *         Null if no Jenkins URL could be computed.
      */
     @CheckForNull
     public String getJenkinsUrlOrNull() {
-        JenkinsLocationConfiguration locationConfiguration = JenkinsLocationConfiguration.get();
-        String url = StringUtils.defaultIfBlank(
-                getJenkinsUrl(),
-                StringUtils.defaultIfBlank(
-                        System.getProperty("KUBERNETES_JENKINS_URL",System.getenv("KUBERNETES_JENKINS_URL")),
-                        locationConfiguration.getUrl()
-                )
-        );
+        String url = getJenkinsUrl();
+        if (url == null && (!isWebSocket() || getCredentialsId() == null)) {
+            url = Util.fixEmpty(System.getProperty("KUBERNETES_JENKINS_URL", System.getenv("KUBERNETES_JENKINS_URL")));
+        }
+        if (url == null) {
+            url = JenkinsLocationConfiguration.get().getUrl();
+        }
         if (url == null) {
             return null;
         }
@@ -527,8 +523,9 @@ public class KubernetesCloud extends Cloud {
     }
 
     @Override
-    public synchronized Collection<NodeProvisioner.PlannedNode> provision(@NonNull final Cloud.CloudState state, final int excessWorkload) {
+    public Collection<NodeProvisioner.PlannedNode> provision(@NonNull final Cloud.CloudState state, final int excessWorkload) {
         try {
+            Metrics.metricRegistry().meter(metricNameForLabel(state.getLabel())).mark(excessWorkload);
             Label label = state.getLabel();
             int plannedCapacity = state.getAdditionalPlannedCapacity(); // Planned nodes, will be launched on the next round of NodeProvisioner
             Set<String> allInProvisioning = InProvisioning.getAllInProvisioning(label); // Nodes being launched
@@ -562,15 +559,23 @@ public class KubernetesCloud extends Cloud {
                         if (!plannedNodes.isEmpty()) {
                             // Return early when a matching template was found and nodes were planned
                             LOGGER.log(Level.FINEST, "Planned {0} Kubernetes agents with template \"{1}\"", new Object[]{plannedNodes.size(), podTemplate.getName()});
+                            Metrics.metricRegistry().counter(MetricNames.PROVISION_NODES).inc(plannedNodes.size());
+                            if (plannedNodes.size() == provisioningLimit && plannedNodes.size() < toBeProvisioned) {
+                                Metrics.metricRegistry().counter(MetricNames.REACHED_POD_CAP).inc();
+                            }
+
                             return plannedNodes;
                         }
                     }
                 } else {
                     LOGGER.log(Level.INFO, "No slot left for provisioning (global limit)");
+                    Metrics.metricRegistry().counter(MetricNames.REACHED_GLOBAL_CAP).inc();
                 }
             }
+            Metrics.metricRegistry().counter(MetricNames.PROVISION_NODES).inc(plannedNodes.size());
             return plannedNodes;
         } catch (KubernetesClientException e) {
+            Metrics.metricRegistry().counter(MetricNames.PROVISION_FAILED).inc();
             Throwable cause = e.getCause();
             if (cause instanceof SocketTimeoutException || cause instanceof ConnectException || cause instanceof UnknownHostException) {
                 LOGGER.log(Level.WARNING, "Failed to connect to Kubernetes at {0}: {1}",
@@ -795,7 +800,7 @@ public class KubernetesCloud extends Cloud {
                     // test listing pods
                     client.pods().list();
                 VersionInfo version = client.getVersion();
-                return FormValidation.ok("Connected to Kubernetes " + version.getMajor() + "." + version.getMinor());
+                return FormValidation.ok("Connected to Kubernetes " + version.getGitVersion());
             } catch (KubernetesClientException e) {
                 LOGGER.log(Level.FINE, String.format("Error testing connection %s", serverUrl), e);
                 return FormValidation.error("Error testing connection %s: %s", serverUrl, e.getCause() == null
@@ -941,9 +946,8 @@ public class KubernetesCloud extends Cloud {
 
     @Override
     public String toString() {
-        return "KubernetesCloud{" +
-                "defaultsProviderTemplate='" + defaultsProviderTemplate + '\'' +
-                ", templates=" + templates +
+        return "KubernetesCloud{name=" + name +
+                ", defaultsProviderTemplate='" + defaultsProviderTemplate + '\'' +
                 ", serverUrl='" + serverUrl + '\'' +
                 ", serverCertificate='" + serverCertificate + '\'' +
                 ", skipTlsVerify=" + skipTlsVerify +
@@ -953,6 +957,7 @@ public class KubernetesCloud extends Cloud {
                 ", jenkinsUrl='" + jenkinsUrl + '\'' +
                 ", jenkinsTunnel='" + jenkinsTunnel + '\'' +
                 ", credentialsId='" + credentialsId + '\'' +
+                ", webSocket=" + webSocket +
                 ", containerCap=" + containerCap +
                 ", retentionTimeout=" + retentionTimeout +
                 ", connectTimeout=" + connectTimeout +
@@ -964,6 +969,7 @@ public class KubernetesCloud extends Cloud {
                 ", waitForPodSec=" + waitForPodSec +
                 ", podRetention=" + podRetention +
                 ", useJenkinsProxy=" + useJenkinsProxy +
+                ", templates=" + templates +
                 '}';
     }
 
@@ -989,7 +995,9 @@ public class KubernetesCloud extends Cloud {
         if (podLabels == null && labels != null) {
             setPodLabels(PodLabel.fromMap(labels));
         }
-
+        if (containerCap != null && containerCap == 0) {
+            containerCap = null;
+        }
         return this;
     }
 

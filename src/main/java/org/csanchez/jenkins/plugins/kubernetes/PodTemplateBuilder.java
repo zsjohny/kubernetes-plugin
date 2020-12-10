@@ -41,6 +41,8 @@ import java.util.stream.Collectors;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import hudson.Util;
 import io.fabric8.kubernetes.api.model.PodSpecFluent;
 import org.apache.commons.lang.StringUtils;
 import org.csanchez.jenkins.plugins.kubernetes.model.TemplateEnvVar;
@@ -68,10 +70,13 @@ import io.fabric8.kubernetes.api.model.PodFluent.SpecNested;
 import io.fabric8.kubernetes.api.model.Probe;
 import io.fabric8.kubernetes.api.model.ProbeBuilder;
 import io.fabric8.kubernetes.api.model.Quantity;
+import io.fabric8.kubernetes.api.model.ResourceRequirements;
+import io.fabric8.kubernetes.api.model.ResourceRequirementsBuilder;
 import io.fabric8.kubernetes.api.model.Volume;
 import io.fabric8.kubernetes.api.model.VolumeBuilder;
 import io.fabric8.kubernetes.api.model.VolumeMount;
 import io.fabric8.kubernetes.api.model.VolumeMountBuilder;
+import io.fabric8.kubernetes.api.model.ContainerFluent.ResourcesNested;
 import io.fabric8.kubernetes.client.utils.Serialization;
 
 import jenkins.model.Jenkins;
@@ -94,6 +99,10 @@ public class PodTemplateBuilder {
 
     private static final String WORKSPACE_VOLUME_NAME = "workspace-volume";
 
+    @SuppressFBWarnings(value = "MS_SHOULD_BE_FINAL", justification = "tests")
+    @VisibleForTesting
+    static String DEFAULT_JNLP_DOCKER_REGISTRY_PREFIX = System
+            .getProperty(PodTemplateStepExecution.class.getName() + ".dockerRegistryPrefix");
     @VisibleForTesting
     static final String DEFAULT_JNLP_IMAGE = System
             .getProperty(PodTemplateStepExecution.class.getName() + ".defaultImage", "jenkins/inbound-agent:4.3-4");
@@ -102,6 +111,11 @@ public class PodTemplateBuilder {
             .getProperty(PodTemplateStepExecution.class.getName() + ".defaultContainer.defaultMemoryRequest", "256Mi");
     static final String DEFAULT_JNLP_CONTAINER_CPU_REQUEST = System
             .getProperty(PodTemplateStepExecution.class.getName() + ".defaultContainer.defaultCpuRequest", "100m");
+
+    static final String DEFAULT_JNLP_CONTAINER_MEMORY_LIMIT = System
+            .getProperty(PodTemplateStepExecution.class.getName() + ".defaultContainer.defaultMemoryLimit");
+    static final String DEFAULT_JNLP_CONTAINER_CPU_LIMIT = System
+            .getProperty(PodTemplateStepExecution.class.getName() + ".defaultContainer.defaultCpuLimit");
 
     private static final String JNLPMAC_REF = "\\$\\{computer.jnlpmac\\}";
     private static final String NAME_REF = "\\$\\{computer.name\\}";
@@ -253,7 +267,11 @@ public class PodTemplateBuilder {
         }
         pod.getSpec().getContainers().stream().filter(c -> c.getWorkingDir() == null).forEach(c -> c.setWorkingDir(jnlp.getWorkingDir()));
         if (StringUtils.isBlank(jnlp.getImage())) {
-            jnlp.setImage(DEFAULT_JNLP_IMAGE);
+            String jnlpImage = DEFAULT_JNLP_IMAGE;
+            if (StringUtils.isNotEmpty(DEFAULT_JNLP_DOCKER_REGISTRY_PREFIX)) {
+                jnlpImage = Util.ensureEndsWith(DEFAULT_JNLP_DOCKER_REGISTRY_PREFIX, "/") + jnlpImage;
+            }
+            jnlp.setImage(jnlpImage);
         }
         Map<String, EnvVar> envVars = new HashMap<>();
         envVars.putAll(jnlpEnvVars(jnlp.getWorkingDir()));
@@ -261,7 +279,27 @@ public class PodTemplateBuilder {
         envVars.putAll(jnlp.getEnv().stream().collect(Collectors.toMap(EnvVar::getName, Function.identity())));
         jnlp.setEnv(new ArrayList<>(envVars.values()));
         if (jnlp.getResources() == null) {
-            jnlp.setResources(new ContainerBuilder().editOrNewResources().addToRequests("cpu", new Quantity(DEFAULT_JNLP_CONTAINER_CPU_REQUEST)).addToRequests("memory", new Quantity(DEFAULT_JNLP_CONTAINER_MEMORY_REQUEST)).endResources().build().getResources());
+
+            Map<String, Quantity> reqMap = new HashMap<>();
+            Map<String, Quantity> limMap = new HashMap<>();
+            reqMap.put("cpu", new Quantity(DEFAULT_JNLP_CONTAINER_CPU_REQUEST));
+            reqMap.put("memory", new Quantity(DEFAULT_JNLP_CONTAINER_MEMORY_REQUEST));
+
+            if (DEFAULT_JNLP_CONTAINER_CPU_LIMIT!=null) {
+                limMap.put("cpu", new Quantity(DEFAULT_JNLP_CONTAINER_CPU_LIMIT));
+            }
+
+            if (DEFAULT_JNLP_CONTAINER_MEMORY_LIMIT!=null) {
+                limMap.put("memory", new Quantity(DEFAULT_JNLP_CONTAINER_MEMORY_LIMIT));
+            }
+
+            ResourceRequirements reqs = new ResourceRequirementsBuilder()
+                        .withRequests(reqMap)
+                        .withLimits(limMap)
+                        .build();
+
+            jnlp.setResources(reqs);
+
         }
         
         // If the volume mounts of any container has been set to null, set it to empty list.
@@ -438,8 +476,8 @@ public class PodTemplateBuilder {
                 .withLivenessProbe(livenessProbe)
                 .withTty(containerTemplate.isTtyEnabled())
                 .withNewResources()
-                .withRequests(getResourcesMap(containerTemplate.getResourceRequestMemory(), containerTemplate.getResourceRequestCpu()))
-                .withLimits(getResourcesMap(containerTemplate.getResourceLimitMemory(), containerTemplate.getResourceLimitCpu()))
+                .withRequests(getResourcesMap(containerTemplate.getResourceRequestMemory(), containerTemplate.getResourceRequestCpu(),containerTemplate.getResourceRequestEphemeralStorage()))
+                .withLimits(getResourcesMap(containerTemplate.getResourceLimitMemory(), containerTemplate.getResourceLimitCpu(), containerTemplate.getResourceLimitEphemeralStorage()))
                 .endResources()
                 .build();
     }
@@ -501,10 +539,11 @@ public class PodTemplateBuilder {
         return commands;
     }
 
-    private Map<String, Quantity> getResourcesMap(String memory, String cpu) {
+    private Map<String, Quantity> getResourcesMap(String memory, String cpu, String ephemeralStorage) {
         ImmutableMap.Builder<String, Quantity> builder = ImmutableMap.<String, Quantity>builder();
         String actualMemory = substituteEnv(memory);
         String actualCpu = substituteEnv(cpu);
+        String actualEphemeralStorage = substituteEnv(ephemeralStorage);
         if (StringUtils.isNotBlank(actualMemory)) {
             Quantity memoryQuantity = new Quantity(actualMemory);
             builder.put("memory", memoryQuantity);
@@ -512,6 +551,10 @@ public class PodTemplateBuilder {
         if (StringUtils.isNotBlank(actualCpu)) {
             Quantity cpuQuantity = new Quantity(actualCpu);
             builder.put("cpu", cpuQuantity);
+        }
+        if (StringUtils.isNotBlank(actualEphemeralStorage)) {
+            Quantity ephemeralStorageQuantity = new Quantity(actualEphemeralStorage);
+            builder.put("ephemeral-storage", ephemeralStorageQuantity);
         }
         return builder.build();
     }
