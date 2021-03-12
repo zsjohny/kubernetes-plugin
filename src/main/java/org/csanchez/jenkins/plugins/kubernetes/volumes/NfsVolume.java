@@ -27,6 +27,7 @@ package org.csanchez.jenkins.plugins.kubernetes.volumes;
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
 
+import org.csanchez.jenkins.plugins.kubernetes.KubernetesLauncher;
 import org.jenkinsci.Symbol;
 import org.kohsuke.stapler.DataBoundConstructor;
 
@@ -35,7 +36,15 @@ import hudson.model.Descriptor;
 import io.fabric8.kubernetes.api.model.Volume;
 import io.fabric8.kubernetes.api.model.VolumeBuilder;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.logging.Logger;
+
+import static java.util.logging.Level.INFO;
+
 public class NfsVolume extends PodVolume {
+    private static final Logger LOGGER = Logger.getLogger(NfsVolume.class.getName());
+
     private String mountPath;
     private String serverAddress;
     private String serverPath;
@@ -44,10 +53,23 @@ public class NfsVolume extends PodVolume {
 
     @DataBoundConstructor
     public NfsVolume(String serverAddress, String serverPath, Boolean readOnly, String mountPath) {
-        this.serverAddress = serverAddress;
         this.serverPath = serverPath;
         this.readOnly = readOnly;
         this.mountPath = mountPath;
+
+        LOGGER.log(INFO, "NfsVolume constructing... watching serverAddress: {0}", new Object[] { serverAddress });
+        // 如果不是ip，则直接在构建的环节做解析
+        if (!isIPAddressByRegex(serverAddress) ){
+            try{
+                serverAddress = InetAddress.getByName(serverAddress).getHostAddress();
+            }catch(UnknownHostException e){
+                e.printStackTrace();
+            }
+        }
+
+        this.serverAddress = serverAddress;
+        LOGGER.log(INFO, "NfsVolume constructed watching serverAddress: {0}", new Object[] { serverAddress });
+
     }
 
     public Volume buildVolume(String volumeName) {
@@ -73,6 +95,24 @@ public class NfsVolume extends PodVolume {
     public Boolean getReadOnly() {
         return readOnly != null && readOnly;
     }
+
+    /**
+     * ip address verify
+     * @param str
+     * @return
+     */
+    public boolean isIPAddressByRegex(String str) {
+        String regex = "\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}";
+        if (str.matches(regex)) {
+            String[] arr = str.split("\\.");
+            for (int i = 0; i < 4; i++) {
+                int temp = Integer.parseInt(arr[i]);
+                if (temp < 0 || temp > 255) return false;
+            }
+            return true;
+        } else return false;
+    }
+
 
     @Extension
     @Symbol("nfsVolume")

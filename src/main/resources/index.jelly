@@ -2,4 +2,6 @@
 <div>
   This plugin integrates Jenkins with
   <a href="https://github.com/GoogleCloudPlatform/kubernetes/">Kubernetes. Maintained by Ruijie Co. Ltd</a>
+  <br />
+  <a href="https://shimo.im/docs/WlArzblVWEFyJ1A2">Changelist</a>
 </div>
